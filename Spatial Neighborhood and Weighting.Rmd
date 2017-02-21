@@ -1,0 +1,245 @@
+---
+title: "Spatial Neighborhood and Weighting"
+author: "許sir"
+output: html_document
+---
+### Data Description
+> Popn_TWN為台灣人口分佈圖層，我們要先將台北市篩選出來
+
+## [第一部份].Measuring the Neighborhood
+
+### 1.設定所需的函式庫(libraries)以及載入資料
+```{r message=FALSE, warning=FALSE}
+rm(list=ls())
+
+library(rgdal)
+library(spdep)  
+
+# Loading Shapefiles
+setwd("D:/Rspatial/W10")
+TWN <- readOGR(dsn = ".", layer = "Popn_TWN", encoding="big5")
+```
+### 2.設定Study Area (Taipei City) for this session
+```{r message=FALSE, warning=FALSE}
+Code<-TWN@data$Code
+sel2<- Code < 42 & Code >=30 #30-42為台北市的範圍
+TWN_North<- TWN[sel2,]
+plot(TWN_North); head(TWN_North@data)
+```
+
+*Spatial Neighbors difine
+- Spatial Adjacency: QUEEN vs. ROOK
+- K-nearest Neighbors (KNN)
+- Distance-based (fixed distance band)
+
+### 3.Spatial Adjacency: QUEEN vs. ROOK
+
+#### **3-1.將面圖層轉換為鄰近關係**
+```{r message=FALSE, warning=FALSE}
+#poly2nb: 將polygon轉換成nb的關係list 
+TWN_nbq<-poly2nb(TWN_North) #預設為QUEEN = TRUE
+TWN_nbq2<-poly2nb(TWN_North, queen=FALSE) #設定為Rooks
+summary(TWN_nbq)
+```
+#### **3-2.Buiding Neighborhood Matrix**
+```{r message=FALSE, warning=FALSE}
+TWN_nbq_w.mat <-nb2mat(TWN_nbq, style="B")#nb2mat是將臨近關係轉成矩陣
+#style =“B” is the basic binary coding
+#style =“W” is row standardized (列標準化)
+#style =“C” is globally standardized(全域標準化)
+#計算Moran's I時用style =“W”會較好
+TWN_nbq_w.mat
+```
+#### **[補充]支線劇情:Finding neighbors of a district**
+```{r message=FALSE, warning=FALSE}
+TWN.region.id <- attr(TWN_nbq, "region.id")
+TWN.neighbors.index = TWN_nbq[[match("33", TWN.region.id)]]#找id=33那一列
+TWN.neighbors = rownames(TWN_nbq_w.mat[TWN.neighbors.index,])#id=33在第五列，把第五列的id秀出來
+TWN.neighbors
+```
+#### **3-2.Plot the Neighborhood Matrix**
+```{r message=FALSE, warning=FALSE}
+coords<-coordinates(TWN_North)#找各區域行政中心點
+plot(TWN_North)
+#coords是將中心點以座標點的方式呈現
+plot(TWN_nbq, coords, add=T)#如果我們是鄰居就連線
+```
+
+### 4.Neighborhood Definition (Distance-based)
+#### **4-1.K-nearest Neighbors (KNN)**
+```{r message=FALSE, warning=FALSE}
+IDs <-TWN_North@data$UNI_ID
+TWN_kn1<-knn2nb(knearneigh(coords, k=1), row.names=IDs)
+#coords, k=1 是以座標點找最近的鄰居
+#knearneigh是函數
+plot(TWN_North)
+plot(TWN_kn1, coords, add=T)
+
+TWN_PTS<-SpatialPointsDataFrame(coords, TWN_North@data)
+sel<- TWN_PTS@data$Area > 30
+plot(TWN_PTS[sel,], col="blue", add=TRUE)
+```
+
+#### **4-2.Distance-based (fixed distance band)**
+```{r message=FALSE, warning=FALSE}
+dist<-unlist(nbdists(TWN_kn1, coords))#產生一個距離矩陣
+#nbdists 是測量到鄰居的距離為何
+#unlist 是將距離轉換成list的格式
+summary(dist)
+
+TWN_ran1<-dnearneigh(coords, d1=0, d2=7000, row.names=IDs)
+#dnearneigh 是用方圓半徑
+#d1=0, d2=7000定義鄰居: 以中心點為圓心，半徑為7000m
+plot(TWN_North)
+plot(TWN_ran1, coords, add=T)
+```
+
+### 5.From Spatial Neighbors to ListW (W matrix)
+
+#### **5-1.Row-standardized weights matrix(列標準化矩陣)** 
+```{r message=FALSE, warning=FALSE}
+TWN_nbq_w<- nb2listw(TWN_nbq, zero.policy=T) # default: style = "W"
+#TWN_nbq<-poly2nb(TWN_North) #預設為QUEEN = TRUE
+#如果給你全台範圍的圖層，則澎湖、綠島、龜山島這種離島會沒有鄰居，此時若不加上zero.policy=T ，就會算不出來，所以定義鄰居數為0的也列出來
+
+TWN_nbq_w
+```
+
+#### **5-2.Binary matrix**
+```{r message=FALSE, warning=FALSE}
+TWN_nbq_wb2<-nb2listw(TWN_nbq, style="B", zero.policy=T) 
+TWN_nbq_wb2
+```
+## [第二部份].Spatial Autocorrelation and Clustering(Global Analysis)
+
+### 1.Moran’s I 
+
+#### **1-1.Moran’s I Statistic**
+```{r message=FALSE, warning=FALSE}
+Popn<-TWN_North@data$Popn; Area<-TWN_North@data$Area
+Density<-Popn/Area #Density是人口密度
+
+TWN_North@data$Density<- Density
+M<-moran.test(Density, listw=TWN_nbq_w, zero.policy=T)
+#TWN_nbq_w<- nb2listw(TWN_nbq, zero.policy=T) # default: style = "W"
+#計算Moran 時用style = "W"較佳
+M
+```
+
+#### **1-2.Monte-Carlo simulation of Moran’s I**
+```{r message=FALSE, warning=FALSE}
+set.seed(123456)
+bperm<-moran.mc(Density,listw=TWN_nbq_w,nsim=999)
+#moran.mc 是隨機的Monte-Carlo
+#nsim=999 模擬999次
+hist(bperm$res, freq=TRUE, breaks=20, xlab="Simulated Moran's I")
+abline(v=0.364, col="red")#moran計算的統計量約為0.364，因此在0.364左右劃一條線
+```
+
+#### **1-3.Moran Correlograms**
+```{r message=FALSE, warning=FALSE}
+#如果用distance去定義，那麼每次都要重新定義distance很麻煩，因此我們可以透過相關係數的概念，看到底要定多少distance才正確
+cor2<-sp.correlogram(TWN_nbq, Density, order=2, method="I", style="W")
+#Density 是我們要的variable
+#order=2 第二鄰近
+#method="I" 用Moran’s I的方法
+#style="W" 列標準化矩陣
+print(cor2); plot(cor2)
+```
+
+#### **1-4.Moran Scatter Plot**
+```{r message=FALSE, warning=FALSE}
+nci <- moran.plot (Density, TWN_nbq_w, labels=IDs , xlab="Popn Density", ylab="SL Popn Density")
+```
+
+
+### 2.Getis-Ord General G Statistic
+```{r message=FALSE, warning=FALSE}
+TWN_ran1_wb<-nb2listw(TWN_ran1, style="B", zero.policy=T)
+#nb2listw 是函數，建立臨近矩陣，用style="B"的方式
+G<-globalG.test(Density, listw=TWN_ran1_wb); G
+```
+
+## [第三部份].Spatial Autocorrelation and Clustering(Local Analysis)
+
+### 1.Local Moran’s I (LISA)
+
+#### **1-1.LISA statistic**
+```{r message=FALSE, warning=FALSE}
+LISA.Density <- localmoran(Density, TWN_nbq_w, zero.policy=T)
+LISA.Density
+#此時的p-value會有偽陽性的問題
+class(LISA.Density)
+
+LISA.Density2 <- as.data.frame(localmoran.exact(lm(Density ~1, TWN_North@data), nb=TWN_nbq, style="C"))
+LISA.Density2
+class(LISA.Density2)
+printCoefmat(data.frame(LISA.Density))
+```
+
+#### **1-2.Adjustment for p-value(Bonferroni p-value adjustment)**
+```{r message=FALSE, warning=FALSE}
+TWN_North$p.adj <- p.adjust(LISA.Density[,5], method="bonferroni")
+
+head(TWN_North@data, n=12)
+```
+
+#### **1-3.Mapping the Results of LISA**
+```{r message=FALSE, warning=FALSE}
+TWN_North$Density <- Density
+TWN_North$z.li <- LISA.Density[,4]
+TWN_North$pvalue <- LISA.Density[,5]
+lm.palette <- colorRampPalette(c("white","orange", "red"), space = "rgb")
+#colorRampPalette(c("white","orange", "red")是用漸層的方式呈現
+
+spplot(TWN_North, zcol="Density", col.regions=lm.palette(20), main="Density")
+spplot(TWN_North, zcol="z.li", col.regions=lm.palette(20), main="Local Moran")
+
+head(TWN_North@data, n=12)
+```
+
+#### **[支線劇情] 另存圖層用ArcGIS畫圖**
+```{r message=FALSE, warning=FALSE}
+writeOGR(TWN_North, dsn=".", layer="Popn_LISA", driver="ESRI Shapefile")
+```
+
+#### **1-4.LISA map**
+```{r message=FALSE, warning=FALSE}
+chk<-Density-mean(Density)
+zi<- LISA.Density[,4]
+quadrant <- vector(mode="numeric",length=nrow(LISA.Density))
+quadrant[chk>0 & zi>0] <- 1 # H-H
+quadrant[chk<0 & zi>0] <- 2 # L-L
+quadrant[chk>0 & zi<0] <- 3 # H-L
+quadrant[chk<0 & zi<0] <- 4 # L-H
+#chk>0 是平均大於0，因此[chk>0 & zi>0]就是平均大於0且Zi大於0，就是HH
+
+signif <- 0.05
+quadrant[LISA.Density[, 5]> signif] <- 5
+colors <- c("red", "blue", "lightpink", "skyblue2", rgb(.95, .95, .95))
+par(mar=c(0,0,1,0)) # sets margin parameters for plot space; 
+# A numeric vector of length 4, which sets the margin sizes in the following order: bottom, left, top, and right. The default is c(5.1, 4.1, 4.1, 2.1).
+plot(TWN_North, border="grey", col=colors[quadrant], main = "LISA Cluster Map, Population Density")
+legend("bottomright",legend=c("High-High","Low-Low","High-Low","Low-High"), fill=colors,bty="n",cex=0.7,y.intersp=1,x.intersp=1)
+```
+
+### 2.Local Analysis of G-statistic
+
+#### **2-1.Local G-statistic**
+```{r message=FALSE, warning=FALSE}
+TWN_nbq#原始的矩陣
+TWN_nbq_in<-include.self(TWN_nbq)#把對角線的值補上
+summary(TWN_nbq_in)
+
+TWN_nbq_in_w<- nb2listw(TWN_nbq_in, zero.policy=T)
+LG<-localG(Density, TWN_nbq_in_w)#要包括自己，所以要寫TWN_nbq_in_w
+LG
+class(LG)
+
+LG1<-0
+for (i in 1:12){LG1[i]<-LG[i]}
+TWN_North$LG<-LG1#會自動轉換為z分數
+lm.palette <- colorRampPalette(c("white","orange", "red"), space = "rgb")
+spplot(TWN_North, zcol="LG", col.regions=lm.palette(20), main="Local G")
+```
+
